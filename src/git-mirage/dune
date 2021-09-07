@@ -47,4 +47,5 @@
   mirage-clock
   mirage-protocols
   mirage-stack
+  dns
   dns-client.mirage))

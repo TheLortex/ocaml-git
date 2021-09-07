@@ -7,7 +7,7 @@ module Make
     end) : sig
   val with_dns :
     ?size:int ->
-    ?nameserver:[ `TCP | `UDP ] * (Ipaddr.t * int) ->
+    ?nameserver:Dns.proto * (Ipaddr.t * int) ->
     ?timeout:int64 ->
     Stack.t ->
     Mimic.ctx ->
