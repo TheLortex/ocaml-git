@@ -1,5 +1,6 @@
 (executable
- (name test)
+ (name test_simple)
+ (modules test_simple)
  (libraries
   cmdliner
   lwt
@@ -9,6 +10,28 @@
   rresult
   fpath
   git
+  git.mem
+  digestif
+  base64
+  fmt
+  fmt.tty
+  logs
+  logs.fmt
+  test_store))
+
+(executable
+ (name test_complex)
+ (modules test_complex)
+ (libraries
+  cmdliner
+  lwt
+  lwt.unix
+  alcotest-lwt
+  result
+  rresult
+  fpath
+  git
+  git.mem
   digestif
   base64
   fmt
@@ -21,6 +44,14 @@
  (alias runtest)
  (package git)
  (deps
-  (:test test.exe))
+  (:test test_simple.exe))
+ (action
+  (run %{test} --color=always)))
+
+(rule
+ (alias runtest)
+ (package git)
+ (deps
+  (:test test_complex.exe))
  (action
   (run %{test} --color=always)))

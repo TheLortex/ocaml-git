@@ -15,6 +15,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
+open Git
 let src = Logs.Src.create "git.mem" ~doc:"logs git's memory back-end"
 
 module Log = (val Logs.src_log src : Logs.LOG)
@@ -412,7 +413,7 @@ end
 
 module Store = Make (Digestif.SHA1)
 
-module Sync (Git_store : Minimal.S) (HTTP : Smart_git.HTTP) = struct
+module Sync (Git_store : Git.S) (HTTP : Smart_git.HTTP) = struct
   let src = Logs.Src.create "git-mem.sync" ~doc:"logs git-mem's sync event"
 
   module Log = (val Logs.src_log src : Logs.LOG)

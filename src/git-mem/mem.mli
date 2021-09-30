@@ -32,12 +32,13 @@
     ext. modules like {!Index} could not be used with this store (because thay
     interact with a file-system back-end). *)
 
+
 type 'hash t
 
 module Make (Digestif : Digestif.S) : sig
   type nonrec t = Digestif.t t
 
-  include Minimal.S with type hash = Digestif.t and type t := t
+  include Git.S with type hash = Digestif.t and type t := t
 
   val v : ?dotgit:Fpath.t -> Fpath.t -> (t, error) result Lwt.t
   (** [create ?root ?dotgit ?compression ()] creates a new store represented by
@@ -48,10 +49,10 @@ end
 
 module Store : sig
   include
-    Minimal.S with type t = Digestif.SHA1.t t and type hash = Digestif.SHA1.t
+  Git.S with type t = Digestif.SHA1.t t and type hash = Digestif.SHA1.t
 
   val v : ?dotgit:Fpath.t -> Fpath.t -> (t, error) result Lwt.t
 end
 
-module Sync (Store : Minimal.S) (HTTP : Smart_git.HTTP) :
-  Sync.S with type hash = Store.hash and type store = Store.t
+module Sync (Store : Git.S) (HTTP : Smart_git.HTTP) :
+  Git.Sync.S with type hash = Store.hash and type store = Store.t

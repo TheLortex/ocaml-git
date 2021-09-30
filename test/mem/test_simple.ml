@@ -36,7 +36,7 @@ let () =
   Fmt.pr "Random: %a.\n%!" Fmt.(Dump.array int) random_seed;
   Random.full_init random_seed
 
-module Store = Git.Mem.Make (Digestif.SHA1)
+module Store = Git_mem.Simple.Make (Digestif.SHA1)
 module Test = Test_store.Make (Digestif.SHA1) (Store)
 open Cmdliner
 

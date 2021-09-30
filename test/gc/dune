@@ -4,6 +4,7 @@
   ptime
   ptime.clock.os
   git
+  git.mem
   cstruct
   bigstringaf
   art

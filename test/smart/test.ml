@@ -285,20 +285,22 @@ let store_err r = R.reword_error (fun e -> `Store e) r
 let sync_err r = R.reword_error (fun e -> `Sync e) r
 let bad_input_err r = R.reword_error (fun e -> `Bad_input e) r
 
+module Mem = Git_mem.Simple
+
 let test_sync_fetch () =
   Alcotest_lwt.test_case "set local ref" `Quick @@ fun _switch () ->
   let open Lwt.Infix in
-  let module Sync = Git.Mem.Sync (Git.Mem.Store) (Git_cohttp_unix) in
+  let module Sync = Mem.Sync (Mem.Store) (Git_cohttp_unix) in
   let capabilities = [ `Side_band_64k ] in
   let head = Git.Reference.v "HEAD" in
   let empty_branch = Git.Reference.v "refs/heads/empty" in
   let master_branch = Git.Reference.v "refs/heads/master" in
   let payloads = empty_repository_fetch in
   let ctx = ctx_with_payloads (payloads, ignore) in
-  Git.Mem.Store.v (Fpath.v "/")
+  Mem.Store.v (Fpath.v "/")
   >|= store_err
   >>? (fun store ->
-        Git.Mem.Store.Ref.write store master_branch
+        Mem.Store.Ref.write store master_branch
           (Git.Reference.Uid (Digestif.SHA1.of_hex "1000"))
         >|= store_err
         >>? fun () ->
@@ -316,7 +318,7 @@ let test_sync_fetch () =
             Alcotest.check git_ref "request reference is fetched" fetched_ref
               head;
             let refs_to_overwrite = [ empty_branch; master_branch ] in
-            Lwt_list.map_s (Git.Mem.Store.Ref.read store) refs_to_overwrite
+            Lwt_list.map_s (Mem.Store.Ref.read store) refs_to_overwrite
             >>= fun pointed_obj_ids ->
             List.combine refs_to_overwrite pointed_obj_ids
             |> List.fold_left
@@ -331,7 +333,7 @@ let test_sync_fetch () =
             |> Lwt.return_ok
         | Some _ -> Alcotest.fail "fetched more refs than requested")
   >|= R.reword_error (function
-        | `Store err -> Alcotest.failf "%a" Git.Mem.Store.pp_error err
+        | `Store err -> Alcotest.failf "%a" Mem.Store.pp_error err
         | `Sync err -> Alcotest.failf "%a" Sync.pp_error err
         | `Bad_input err -> Alcotest.failf "%a" R.pp_msg err)
   >|= ignore
@@ -1660,7 +1662,7 @@ let capability = Alcotest.testable Smart.Capability.pp Smart.Capability.equal
 let test_push_capabilities () =
   Alcotest_lwt.test_case "push capabilities" `Quick @@ fun _sw () ->
   let open Lwt.Infix in
-  let module Sync = Git.Mem.Sync (Git.Mem.Store) (Git_cohttp_unix) in
+  let module Sync = Mem.Sync (Mem.Store) (Git_cohttp_unix) in
   let output = ref None in
   let ctx = ctx_with_payloads (simple_push, fun v -> output := Some v) in
   let capabilities =
@@ -1687,19 +1689,17 @@ let test_push_capabilities () =
          Int64.of_float (Ptime.to_float_s ptime), tz);
     }
   in
-  let tree0 = Git.Mem.Store.Value.(tree (Tree.v [])) in
+  let tree0 = Mem.Store.Value.(tree (Tree.v [])) in
   let commit0 root =
-    Git.Mem.Store.Value.(
+    Mem.Store.Value.(
       commit
         (Commit.make ~parents:[] ~tree:root ~author ~committer:author (Some ".")))
   in
   let fiber =
-    Git.Mem.Store.v (Fpath.v "/") >|= store_err >>? fun store ->
-    Git.Mem.Store.write store tree0 >|= store_err >>? fun (root, _) ->
-    Git.Mem.Store.write store (commit0 root) >|= store_err
-    >>? fun (commit, _) ->
-    Git.Mem.Store.Ref.write store Git.Reference.master
-      (Git.Reference.uid commit)
+    Mem.Store.v (Fpath.v "/") >|= store_err >>? fun store ->
+    Mem.Store.write store tree0 >|= store_err >>? fun (root, _) ->
+    Mem.Store.write store (commit0 root) >|= store_err >>? fun (commit, _) ->
+    Mem.Store.Ref.write store Git.Reference.master (Git.Reference.uid commit)
     >|= store_err
     >>? fun _ ->
     Smart_git.Endpoint.of_string "git@localhost:not-found.git" |> Lwt.return
@@ -1722,7 +1722,7 @@ let test_push_capabilities () =
   | Error (`Exn exn) -> Alcotest.failf "%s" (Printexc.to_string exn)
   | Error (#Mimic.error as err) -> Alcotest.failf "%a" Mimic.pp_error err
   | Error (`Sync err) -> Alcotest.failf "%a" Sync.pp_error err
-  | Error (`Store err) -> Alcotest.failf "%a" Git.Mem.Store.pp_error err
+  | Error (`Store err) -> Alcotest.failf "%a" Mem.Store.pp_error err
 
 let update_testzone_1 store =
   let { path; _ } = store_prj store in

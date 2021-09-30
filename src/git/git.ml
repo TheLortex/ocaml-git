@@ -15,7 +15,6 @@ module Value = Value
 module Traverse_bfs = Traverse_bfs
 module Object_graph = Object_graph
 module Search = Search
-module Mem = Mem
 module Store = Store
 module Hash = Hash
 module Sync = Sync

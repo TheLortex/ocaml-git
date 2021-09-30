@@ -1,0 +1,53 @@
+(library
+ (name git_mem)
+ (public_name git.mem)
+ (libraries
+  art
+  git
+  digestif
+  git.nss.git
+  git.loose-git
+  carton_git
+  fpath
+  cstruct
+  lwt
+  logs
+  carton
+  bigstringaf
+  bigarray-compat
+  decompress.de
+  decompress.zl
+  fmt
+  result))
+
+;hxd.core
+;hxd.string
+;bigarray-compat
+;mimic
+;rresult
+;git.nss.sigs
+;git.nss.pck
+;optint
+;loose
+;decompress.de
+;decompress.zl
+;result
+;git.nss.smart
+;logs
+;lwt
+;cstruct
+;angstrom
+;bigstringaf
+;carton
+;ke
+;fmt
+;checkseum
+;git.nss.git
+;git.nss.hkt
+;ocamlgraph
+;astring
+;fpath
+;loose_git
+;carton-lwt
+;carton-git
+;digestif))
