@@ -87,4 +87,6 @@ module Make
     refs:Rs.t ->
     Fpath.t ->
     t Lwt.t
+
+  val gc : t -> unit Lwt.t
 end

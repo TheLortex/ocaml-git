@@ -1,0 +1,34 @@
+(executable
+ (name test)
+ (libraries
+  ptime
+  ptime.clock.os
+  git
+  cstruct
+  bigstringaf
+  art
+  digestif
+  cmdliner
+  rresult
+  result
+  alcotest
+  fpath
+  lwt
+  lwt.unix
+  alcotest-lwt
+  base64
+  bos
+  git-unix
+  fmt
+  fmt.tty
+  logs
+  logs.fmt
+  test_store))
+
+(rule
+ (alias runtest)
+ (package git)
+ (deps
+  (:test test.exe))
+ (action
+  (run %{test} --color=always)))

@@ -10,8 +10,19 @@ module type STORE = sig
   val exists : t -> uid -> bool fiber
   val length : t -> uid -> (int64, error) result fiber
   val map : t -> uid -> pos:int64 -> int -> Bigstringaf.t fiber
-  val append : t -> uid -> Bigstringaf.t -> (unit, error) result fiber
-  val appendv : t -> uid -> Bigstringaf.t list -> (unit, error) result fiber
+
+  val append :
+    t ->
+    uid ->
+    Bigstringaf.t ->
+    (unit, [ `Error of error | `Out_of_memory ]) result fiber
+
+  val appendv :
+    t ->
+    uid ->
+    Bigstringaf.t list ->
+    (unit, [ `Error of error | `Out_of_memory ]) result fiber
+
   val list : t -> uid list fiber
   val reset : t -> (unit, error) result fiber
 end
@@ -35,14 +46,21 @@ module Make
     Store.t ->
     buffers ->
     Carton.Dec.v ->
-    (Uid.t * int, [> `Store of Store.error | `Non_atomic ]) result IO.t
+    ( Uid.t * int,
+      [> `Store of [ `Error of Store.error | `Out_of_memory ] | `Non_atomic ]
+    )
+    result
+    IO.t
 
   val add :
     Store.t ->
     buffers ->
     [ `Blob | `Commit | `Tag | `Tree ] * int64 ->
     (unit -> string option IO.t) ->
-    (Uid.t * int, [> `Store of Store.error ]) result IO.t
+    ( Uid.t * int,
+      [> `Store of [ `Error of Store.error | `Out_of_memory ] ] )
+    result
+    IO.t
 
   val atomic_get :
     Store.t -> buffers -> Uid.t -> (Carton.Dec.v, [> `Non_atomic ]) result IO.t

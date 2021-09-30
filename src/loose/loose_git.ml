@@ -12,8 +12,19 @@ module type STORE = sig
   val exists : t -> uid -> bool fiber
   val length : t -> uid -> (int64, error) result fiber
   val map : t -> uid -> pos:int64 -> int -> Bigstringaf.t fiber
-  val append : t -> uid -> Bigstringaf.t -> (unit, error) result fiber
-  val appendv : t -> uid -> Bigstringaf.t list -> (unit, error) result fiber
+
+  val append :
+    t ->
+    uid ->
+    Bigstringaf.t ->
+    (unit, [ `Error of error | `Out_of_memory ]) result fiber
+
+  val appendv :
+    t ->
+    uid ->
+    Bigstringaf.t list ->
+    (unit, [ `Error of error | `Out_of_memory ]) result fiber
+
   val list : t -> uid list fiber
   val reset : t -> (unit, error) result fiber
 end

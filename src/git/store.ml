@@ -74,6 +74,7 @@ module Make
     (Mj : Mj with type +'a fiber = 'a Lwt.t)
     (Rs : Rs with type +'a fiber = 'a) =
 struct
+  module V = Value
   module Hash = Hash.Make (Digestif)
   module Value = Value.Make (Hash)
   module Caml_scheduler = Carton.Make (struct type 'a t = 'a end)
@@ -216,7 +217,9 @@ struct
         | Error `Non_atomic -> (
             Loose.get t.minor buffers hash >>= function
             | Ok v -> Lwt.return_some v
-            | Error _ -> Lwt.return_none))
+            | Error e ->
+                Log.err (fun l -> l "Error: %a" pp_error e);
+                Lwt.return_none))
 
   let read t hash =
     read_inflated t hash >>= function
@@ -258,32 +261,6 @@ struct
     in
     stream
 
-  let write t v =
-    let raw = Value.to_raw_without_header v in
-    let len = String.length raw in
-    let raw = Bigstringaf.of_string raw ~off:0 ~len in
-    let kind =
-      match v with Commit _ -> `A | Tree _ -> `B | Blob _ -> `C | Tag _ -> `D
-    in
-    let raw = Carton.Dec.v ~kind raw in
-    Lwt_pool.use t.buffs @@ fun buffers ->
-    Loose.atomic_add t.minor buffers raw >>= function
-    | Ok v -> Lwt.return_ok v
-    | Error (`Store err) -> Lwt.return_error (`Minor err)
-    | Error `Non_atomic -> (
-        let kind =
-          match v with
-          | Commit _ -> `Commit
-          | Tree _ -> `Tree
-          | Blob _ -> `Blob
-          | Tag _ -> `Tag
-        in
-        let length = Int64.of_int (Carton.Dec.len raw) in
-        let stream = stream_of_raw raw in
-        Loose.add t.minor buffers (kind, length) stream >>= function
-        | Ok _ as v -> Lwt.return v
-        | Error (`Store err) -> Lwt.return_error (`Minor err))
-
   let read_inflated t hash =
     read_inflated t hash >>= function
     | Some v ->
@@ -299,31 +276,6 @@ struct
         in
         Lwt.return_some (kind, raw)
     | None -> Lwt.return_none
-
-  let write_inflated t ~kind raw =
-    let { Cstruct.buffer; off; len } = raw in
-    let raw = Bigstringaf.sub buffer ~off ~len in
-    let kind0 =
-      match kind with `Commit -> `A | `Tree -> `B | `Blob -> `C | `Tag -> `D
-    in
-    let v = Carton.Dec.v ~kind:kind0 raw in
-    Lwt_pool.use t.buffs @@ fun buffers ->
-    Loose.atomic_add t.minor buffers v >>= function
-    | Ok (hash, _) -> Lwt.return hash
-    | Error (`Store err) ->
-        Lwt.fail (Failure (Fmt.str "%a" pp_error (`Minor err)))
-    | Error `Non_atomic -> (
-        let consumed = Stdlib.ref false in
-        let stream () =
-          if !consumed then Lwt.return_none
-          else (
-            consumed := true;
-            Lwt.return_some (Bigstringaf.to_string raw))
-        in
-        Loose.add t.minor buffers (kind, Int64.of_int len) stream >>= function
-        | Ok (hash, _) -> Lwt.return hash
-        | Error (`Store err) ->
-            Lwt.fail (Failure (Fmt.str "%a" pp_error (`Minor err))))
 
   let mem t hash =
     if not (Pack.exists t.major t.packs hash) then Loose.exists t.minor hash
@@ -368,6 +320,7 @@ struct
   let iter = Traverse.iter
 
   let ( >>? ) x f =
+    (* Lwt_result.bind ? *)
     let open Lwt.Infix in
     x >>= function Ok x -> f x | Error err -> Lwt.return_error err
 
@@ -473,6 +426,348 @@ struct
         Lwt.return res)
       else Lwt.return res
   end
+
+  module Gc_minor = struct
+    let read_minor t hash =
+      let open Lwt.Syntax in
+      let+ v =
+        Lwt_pool.use t.buffs @@ fun buffers ->
+        Loose.atomic_get t.minor buffers hash >>= function
+        | Ok v -> Lwt.return v
+        | Error `Non_atomic -> (
+            Loose.get t.minor buffers hash >>= function
+            | Ok v -> Lwt.return v
+            | Error e ->
+                Log.err (fun l -> l "Error: %a" pp_error e);
+                Lwt.fail_with ":(")
+      in
+      let kind =
+        match Carton.Dec.kind v with
+        | `A -> `Commit
+        | `B -> `Tree
+        | `C -> `Blob
+        | `D -> `Tag
+      in
+      let raw =
+        Cstruct.of_bigarray (Carton.Dec.raw v) ~off:0 ~len:(Carton.Dec.len v)
+      in
+      Value.of_raw ~kind raw
+
+    let live_objects t roots =
+      let open Lwt.Syntax in
+      let todo = Queue.create () in
+      List.iter (fun x -> Queue.add x todo) roots;
+      let rec walk hashes objects =
+        match Queue.pop todo with
+        (* Traversal is done*)
+        | exception Queue.Empty -> Lwt.return hashes
+        (* Node already traversed *)
+        | hash when Hash.Set.mem hash hashes -> walk hashes objects
+        | hash -> (
+            Log.debug (fun f -> f ">> %s" (Hash.to_hex hash));
+            let* mj_result =
+              Pack.get t.major ~resources:(resources t) t.packs hash
+            in
+            match mj_result with
+            (* In major heap*)
+            | Ok _ ->
+                Log.debug (fun f -> f "In major heap. Stopping here.");
+                walk hashes objects
+            (* Error *)
+            | Error (`Msg _) -> failwith "?"
+            (* In minor heap*)
+            | Error (`Not_found _) ->
+                Log.debug (fun f -> f "In minor heap.");
+                let* v = read_minor t hash in
+                let v = Result.get_ok v in
+                let objects = v :: objects in
+                let hashes = Hash.Set.add hash hashes in
+                let* () =
+                  match v with
+                  | V.Commit commit ->
+                      let+ is_shallowed = is_shallowed t hash in
+                      if not is_shallowed then (
+                        List.iter
+                          (fun x -> Queue.add x todo)
+                          (Value.Commit.parents commit);
+                        Queue.add (Value.Commit.tree commit) todo)
+                  | V.Tree tree ->
+                      List.iter
+                        (fun { Tree.node; _ } -> Queue.add node todo)
+                        (Value.Tree.to_list tree);
+                      Lwt.return ()
+                  | V.Tag tag ->
+                      Queue.add (Value.Tag.obj tag) todo;
+                      Lwt.return_unit
+                  | V.Blob _ -> Lwt.return_unit
+                in
+                walk hashes objects)
+      in
+
+      walk Hash.Set.empty []
+  end
+
+  module Repack = struct
+    let light_load t hash =
+      let open Lwt.Syntax in
+      Lwt_pool.use t.buffs @@ fun buffers ->
+      let+ v = Loose.get t.minor buffers hash in
+      match v with
+      | Error _ -> failwith "Failed to load"
+      | Ok v -> Carton.Dec.kind v, Carton.Dec.len v
+
+    let heavy_load t hash =
+      let open Lwt.Syntax in
+      Lwt_pool.use t.buffs @@ fun buffers ->
+      let+ v = Loose.get t.minor buffers hash in
+      match v with Error _ -> failwith "Failed to load" | Ok v -> v
+
+    module Verbose = struct
+      type 'a fiber = 'a Lwt.t
+
+      let succ () = Lwt.return_unit
+      let print () = Lwt.return_unit
+    end
+
+    module Delta = Carton_lwt.Enc.Delta (Hash) (Verbose)
+
+    let deltify ?(threads = 4) t (uids : Hash.t list) =
+      let open Lwt.Infix in
+      let fold (uid : Hash.t) =
+        light_load t uid >|= fun (kind, length) ->
+        Carton_lwt.Enc.make_entry ~kind ~length uid
+      in
+      Lwt_list.map_p fold uids >|= Array.of_list >>= fun entries ->
+      Delta.delta
+        ~threads:(List.init threads (fun _thread -> heavy_load t))
+        ~weight:10 ~uid_ln:Hash.length entries
+      >>= fun targets -> Lwt.return (entries, targets)
+
+    let header = Bigstringaf.create 12
+
+    let pack t stream targets =
+      let open Lwt.Infix in
+      let offsets = Hashtbl.create (Array.length targets) in
+      let crcs = Hashtbl.create (Array.length targets) in
+      let find uid =
+        match Hashtbl.find offsets uid with
+        | v -> Lwt.return_some v
+        | exception Not_found -> Lwt.return_none
+      in
+      let uid =
+        {
+          Carton.Enc.uid_ln = Hash.length;
+          Carton.Enc.uid_rw = Hash.to_raw_string;
+        }
+      in
+      let b =
+        {
+          Carton.Enc.o = Bigstringaf.create De.io_buffer_size;
+          Carton.Enc.i = Bigstringaf.create De.io_buffer_size;
+          Carton.Enc.q = De.Queue.create 0x10000;
+          Carton.Enc.w = De.Lz77.make_window ~bits:15;
+        }
+      in
+      let ctx = Stdlib.ref Hash.empty in
+      let cursor = Stdlib.ref 0 in
+      Carton.Enc.header_of_pack ~length:(Array.length targets) header 0 12;
+      stream (Some (Bigstringaf.to_string header));
+      ctx := Hash.feed !ctx header ~off:0 ~len:12;
+      cursor := !cursor + 12;
+      let encode_targets targets =
+        let encode_target idx =
+          let target_uid = Carton.Enc.target_uid targets.(idx) in
+          Hashtbl.add offsets target_uid !cursor;
+          Carton_lwt.Enc.encode_target ~b ~find ~load:(heavy_load t) ~uid
+            targets.(idx) ~cursor:!cursor
+          >>= fun (len, encoder) ->
+          let crc = Stdlib.ref Checkseum.Crc32.default in
+          let rec go encoder =
+            match Carton.Enc.N.encode ~o:b.o encoder with
+            | `Flush (encoder, len) ->
+                let payload = Bigstringaf.substring b.o ~off:0 ~len in
+                stream (Some payload);
+                crc := Checkseum.Crc32.digest_string payload 0 len !crc;
+                ctx := Hash.feed !ctx b.o ~off:0 ~len;
+                cursor := !cursor + len;
+                let encoder =
+                  Carton.Enc.N.dst encoder b.o 0 (Bigstringaf.length b.o)
+                in
+                go encoder
+            | `End -> Lwt.return ()
+          in
+          let payload = Bigstringaf.substring b.o ~off:0 ~len in
+          stream (Some payload);
+          crc := Checkseum.Crc32.digest_string payload 0 len !crc;
+          ctx := Hash.feed !ctx b.o ~off:0 ~len;
+          cursor := !cursor + len;
+          let encoder =
+            Carton.Enc.N.dst encoder b.o 0 (Bigstringaf.length b.o)
+          in
+          go encoder >|= fun () -> Hashtbl.add crcs target_uid !crc
+        in
+
+        let rec go idx =
+          if idx < Array.length targets then
+            encode_target idx >>= fun () -> go (succ idx)
+          else Lwt.return ()
+        in
+        go 0
+      in
+      encode_targets targets >>= fun () ->
+      let uid = Hash.get !ctx |> Hash.to_raw_string in
+      stream (Some uid);
+      stream None;
+
+      let idx_entries =
+        Hashtbl.to_seq crcs
+        |> Seq.map (fun (uid, crc) ->
+               let offset = Int64.of_int (Hashtbl.find offsets uid) in
+               { Carton.Dec.Idx.crc; offset; uid })
+        |> Array.of_seq
+      in
+      Lwt.return (Hash.get !ctx, idx_entries)
+
+    let idx stream pack ids =
+      let open Lwt.Syntax in
+      let module Idx = Carton.Dec.Idx.N (Hash) in
+      let buffer_size = De.io_buffer_size in
+      let buffer = Bigstringaf.create buffer_size in
+      let encoder = Idx.encoder `Manual ~pack ids in
+      Idx.dst encoder buffer 0 buffer_size;
+      let rec loop () =
+        let* () = Lwt.pause () in
+        let result = Idx.encode encoder `Await in
+        let dst_rem = Idx.dst_rem encoder in
+        let len = buffer_size - dst_rem in
+        let payload = Bigstringaf.substring buffer ~off:0 ~len in
+        stream (Some payload);
+        match result with
+        | `Partial -> loop ()
+        | `Ok ->
+            stream None;
+            Lwt.return_unit
+      in
+      loop ()
+
+    let pack t uids =
+      let open Lwt.Infix in
+      let open Lwt.Syntax in
+      let stream_pack, pusher_pack = Lwt_stream.create () in
+      let stream_idx, pusher_idx = Lwt_stream.create () in
+      let uid_mailbox = Lwt_mvar.create_empty () in
+      let fiber () =
+        deltify t uids >>= fun (_, targets) ->
+        let* pack, ids = pack t pusher_pack targets in
+        let* () = Lwt_mvar.put uid_mailbox pack in
+        idx pusher_idx pack ids
+      in
+      Lwt.async fiber;
+      ( (fun () -> Lwt_stream.get stream_pack),
+        (fun () -> Lwt_stream.get stream_idx),
+        fun () -> Lwt_mvar.take uid_mailbox )
+  end
+
+  let gc t =
+    Log.info (fun f -> f "GC");
+    let open Lwt.Syntax in
+    let* roots = Ref.list t |> Lwt.map (List.map snd) in
+    let* live = Gc_minor.live_objects t roots in
+    let* minor_commits = Mn.list t.minor in
+    Log.info (fun f ->
+        f "GC: live %d/%d" (Hash.Set.cardinal live) (List.length minor_commits));
+    let pck, idx, uid = Repack.pack t (Hash.Set.to_seq live |> List.of_seq) in
+    let tmp_hash = Hash.digest_string "/tmp" in
+    let* v = batch_write t tmp_hash ~pck ~idx in
+    Result.get_ok v;
+    let* uid = uid () in
+    let idx_uid = t.major_uid.idx_major_uid_of_uid t.major uid in
+    let pck_uid = t.major_uid.pck_major_uid_of_uid t.major uid in
+    let idx_tmp_uid = t.major_uid.idx_major_uid_of_uid t.major tmp_hash in
+    let pck_tmp_uid = t.major_uid.pck_major_uid_of_uid t.major tmp_hash in
+    let* _ = Mj.move t.major ~src:pck_tmp_uid ~dst:pck_uid in
+    let* _ = Mj.move t.major ~src:idx_tmp_uid ~dst:idx_uid in
+    let+ _ = Mn.reset t.minor in
+    Log.info (fun f -> f "GC finished")
+
+  let write t v =
+    let open Lwt.Syntax in
+    let raw = Value.to_raw_without_header v in
+    let len = String.length raw in
+    let raw = Bigstringaf.of_string raw ~off:0 ~len in
+    let kind =
+      match v with Commit _ -> `A | Tree _ -> `B | Blob _ -> `C | Tag _ -> `D
+    in
+    let raw = Carton.Dec.v ~kind raw in
+    let rec do_it ~retry () =
+      Lwt_pool.use t.buffs @@ fun buffers ->
+      Loose.atomic_add t.minor buffers raw >>= function
+      | Ok v -> Lwt.return_ok v
+      | Error (`Store `Out_of_memory) when retry ->
+          let* () = gc t in
+          do_it ~retry:false ()
+      | Error (`Store `Out_of_memory) ->
+          failwith "object too big for minor heap"
+      | Error (`Store (`Error err)) -> Lwt.return_error (`Minor err)
+      | Error `Non_atomic -> (
+          let kind =
+            match v with
+            | Commit _ -> `Commit
+            | Tree _ -> `Tree
+            | Blob _ -> `Blob
+            | Tag _ -> `Tag
+          in
+          let length = Int64.of_int (Carton.Dec.len raw) in
+          let stream = stream_of_raw raw in
+          Loose.add t.minor buffers (kind, length) stream >>= function
+          | Ok _ as v -> Lwt.return v
+          | Error (`Store `Out_of_memory) when retry ->
+              let* () = gc t in
+              do_it ~retry:false ()
+          | Error (`Store `Out_of_memory) ->
+              failwith "object too big for minor heap"
+          | Error (`Store (`Error err)) -> Lwt.return_error (`Minor err))
+    in
+    do_it ~retry:true ()
+
+  let write_inflated t ~kind raw =
+    let open Lwt.Syntax in
+    let { Cstruct.buffer; off; len } = raw in
+    let raw = Bigstringaf.sub buffer ~off ~len in
+    let kind0 =
+      match kind with `Commit -> `A | `Tree -> `B | `Blob -> `C | `Tag -> `D
+    in
+    let v = Carton.Dec.v ~kind:kind0 raw in
+    let rec do_it ~retry () =
+      Lwt_pool.use t.buffs @@ fun buffers ->
+      Loose.atomic_add t.minor buffers v >>= function
+      | Ok (hash, _) -> Lwt.return hash
+      | Error (`Store `Out_of_memory) when retry ->
+          let* () = gc t in
+          do_it ~retry:false ()
+      | Error (`Store `Out_of_memory) ->
+          failwith "object too big for minor heap"
+      | Error (`Store (`Error err)) ->
+          Lwt.fail (Failure (Fmt.str "%a" pp_error (`Minor err)))
+      | Error `Non_atomic -> (
+          let consumed = Stdlib.ref false in
+          let stream () =
+            if !consumed then Lwt.return_none
+            else (
+              consumed := true;
+              Lwt.return_some (Bigstringaf.to_string raw))
+          in
+          Loose.add t.minor buffers (kind, Int64.of_int len) stream >>= function
+          | Ok (hash, _) -> Lwt.return hash
+          | Error (`Store `Out_of_memory) when retry ->
+              let* () = gc t in
+              do_it ~retry:false ()
+          | Error (`Store `Out_of_memory) ->
+              failwith "object too big for minor heap"
+          | Error (`Store (`Error err)) ->
+              Lwt.fail (Failure (Fmt.str "%a" pp_error (`Minor err))))
+    in
+    do_it ~retry:true ()
 
   let reset t =
     Log.info (fun m -> m "Reset store %a." Fpath.pp t.root);

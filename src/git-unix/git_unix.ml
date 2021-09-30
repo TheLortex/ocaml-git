@@ -260,7 +260,7 @@ module Minor_heap (Digestif : Digestif.S) = struct
       Bos.OS.Dir.create Fpath.(root / hd) >>= fun _ ->
       Bos.OS.File.write path (Bigstringaf.to_string payload)
     in
-    Lwt.return (fiber ())
+    Lwt.return (fiber () |> Result.map_error (fun v -> `Error v))
 
   let f emitter (tmp, payloads) =
     let rec go pos = function
@@ -285,7 +285,8 @@ module Minor_heap (Digestif : Digestif.S) = struct
       Bos.OS.Dir.create Fpath.(root / hd) >>= fun _ ->
       Bos.OS.File.with_output path f (Bytes.create De.io_buffer_size, payloads)
     in
-    Lwt.return (Rresult.R.join (fiber ()))
+    Lwt.return
+      (Rresult.R.join (fiber ()) |> Result.map_error (fun v -> `Error v))
 
   let list root =
     let f x r =
